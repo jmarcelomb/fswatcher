@@ -84,7 +84,7 @@ fn main() -> notify::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", "warn"))
         .init();
     let matches = ClapCommand::new("fswatcher")
-        .version("0.1.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Marcel Borges")
         .about("Watches a file and executes a command on changes")
         .arg(
