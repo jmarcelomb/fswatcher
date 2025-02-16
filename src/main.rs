@@ -7,8 +7,8 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::sync::{mpsc::channel, Arc, Mutex};
+use std::time::{Duration, Instant};
 
 struct LockFile {
     path: PathBuf,
@@ -40,10 +40,9 @@ impl LockFile {
             }
         }
     }
-}
 
-impl Drop for LockFile {
-    fn drop(&mut self) {
+    /// Manually delete the lock file
+    fn cleanup(&self) {
         if let Err(e) = remove_file(&self.path) {
             error!(
                 "Failed to delete lock file {}: {:?}",
@@ -53,6 +52,12 @@ impl Drop for LockFile {
         } else {
             info!("Lock file deleted: {}", self.path.display());
         }
+    }
+}
+
+impl Drop for LockFile {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }
 
@@ -83,6 +88,7 @@ fn hash_command(command: &str) -> u64 {
 fn main() -> notify::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", "warn"))
         .init();
+
     let matches = ClapCommand::new("fswatcher")
         .version(env!("CARGO_PKG_VERSION"))
         .author("Marcel Borges")
@@ -114,19 +120,43 @@ fn main() -> notify::Result<()> {
         .join(" ");
 
     // Prevent multiple instances
-    let _lock_file = LockFile::new(&command).map_err(|e| {
+    let lock_file = Arc::new(LockFile::new(&command).map_err(|e| {
         error!("Failed to acquire lock file: {}", e);
         notify::Error::generic(format!("Lock file error: {:?}", e).as_str())
-    })?;
+    })?);
+
+    // Handle Ctrl+C to clean up lock file
+    let lock_file_clone = lock_file.clone();
+    ctrlc::set_handler(move || {
+        info!("Received SIGINT, cleaning up..");
+        lock_file_clone.cleanup();
+        std::process::exit(0);
+    })
+    .expect("Error setting Ctrl+C handler");
 
     let (tx, rx) = channel();
 
+    let last_event_time = Arc::new(Mutex::new(Instant::now()));
+    let debounce_duration = Duration::from_millis(500);
+
     let mut watcher = RecommendedWatcher::new(
-        move |res: Result<Event, notify::Error>| {
-            if let Ok(event) = res {
-                info!("File changed..");
-                if matches!(event.kind, EventKind::Modify(_)) {
-                    tx.send(()).expect("Failed to send notification");
+        {
+            let last_event_time = Arc::clone(&last_event_time);
+            move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    info!("File changed..");
+
+                    if matches!(event.kind, EventKind::Modify(_)) {
+                        let mut last_event = last_event_time.lock().unwrap();
+                        let now = Instant::now();
+
+                        if now.duration_since(*last_event) > debounce_duration {
+                            *last_event = now;
+                            tx.send(()).expect("Failed to send notification");
+                        } else {
+                            info!("Skipping duplicate event..");
+                        }
+                    }
                 }
             }
         },
