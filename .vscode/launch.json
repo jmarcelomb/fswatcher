@@ -1,0 +1,45 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'fswatcher'",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=fswatcher",
+          "--package=fswatcher"
+        ],
+        "filter": {
+          "name": "fswatcher",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "./resources/test_file.txt",
+        "cat ./resources/test_file.txt"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in executable 'fswatcher'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--bin=fswatcher",
+          "--package=fswatcher"
+        ],
+        "filter": {
+          "name": "fswatcher",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

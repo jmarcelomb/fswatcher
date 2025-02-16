@@ -1,17 +1,26 @@
 use clap::{Arg, Command as ClapCommand};
+use futures::{
+    channel::mpsc::{channel, Receiver},
+    SinkExt, StreamExt,
+};
 use log::{error, info, warn};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{remove_file, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{self, ErrorKind};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::{mpsc::channel, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::{path::PathBuf, sync::Arc};
+use tokio::{process::Command, signal};
 
 struct LockFile {
     path: PathBuf,
+}
+
+/// Generate a unique hash for the command string
+fn hash_command(command: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    command.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl LockFile {
@@ -41,7 +50,6 @@ impl LockFile {
         }
     }
 
-    /// Manually delete the lock file
     fn cleanup(&self) {
         if let Err(e) = remove_file(&self.path) {
             error!(
@@ -61,31 +69,53 @@ impl Drop for LockFile {
     }
 }
 
-/// Execute the provided command and stream its output
-fn execute_command(command: &str) -> io::Result<()> {
-    info!("Executing command..");
-    let mut child = Command::new("sh")
+async fn execute_command(command: &str) -> io::Result<()> {
+    info!("Executing command: {}", command);
+    let status = Command::new("sh")
         .arg("-c")
         .arg(command)
-        .stdout(Stdio::inherit()) // Stream output to console
-        .stderr(Stdio::inherit())
-        .spawn()?;
-
-    let status = child.wait()?;
+        .spawn()?
+        .wait()
+        .await?;
     if !status.success() {
-        error!("Command failed: {} with status: {}", command, status);
+        error!("Command failed: {} with status: {:?}", command, status);
     }
     Ok(())
 }
 
-/// Generate a unique hash for the command string
-fn hash_command(command: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    command.hash(&mut hasher);
-    hasher.finish()
+fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Result<Event>>)> {
+    let (mut tx, rx) = channel(1);
+    let watcher = RecommendedWatcher::new(
+        move |res| {
+            futures::executor::block_on(async {
+                tx.send(res).await.unwrap();
+            })
+        },
+        Config::default(),
+    )?;
+    Ok((watcher, rx))
 }
 
-fn main() -> notify::Result<()> {
+async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
+    let (mut watcher, mut rx) = async_watcher()?;
+    watcher.watch(&path, RecursiveMode::NonRecursive)?;
+    info!("Watching: {}", path.display());
+    while let Some(res) = rx.next().await {
+        match res {
+            Ok(event) => {
+                info!("File changed: {:?}", event);
+                if let Err(e) = execute_command(&command).await {
+                    error!("Error executing command: {}", e);
+                }
+            }
+            Err(e) => error!("Watch error: {:?}", e),
+        }
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> notify::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", "warn"))
         .init();
 
@@ -111,7 +141,6 @@ fn main() -> notify::Result<()> {
         .get_matches();
 
     let file_path = PathBuf::from(matches.get_one::<String>("file").unwrap());
-
     let command = matches
         .get_many::<String>("command")
         .unwrap()
@@ -127,52 +156,13 @@ fn main() -> notify::Result<()> {
 
     // Handle Ctrl+C to clean up lock file
     let lock_file_clone = lock_file.clone();
-    ctrlc::set_handler(move || {
+
+    tokio::spawn(async move {
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info!("Received SIGINT, cleaning up..");
         lock_file_clone.cleanup();
         std::process::exit(0);
-    })
-    .expect("Error setting Ctrl+C handler");
+    });
 
-    let (tx, rx) = channel();
-
-    let last_event_time = Arc::new(Mutex::new(Instant::now()));
-    let debounce_duration = Duration::from_millis(500);
-
-    let mut watcher = RecommendedWatcher::new(
-        {
-            let last_event_time = Arc::clone(&last_event_time);
-            move |res: Result<Event, notify::Error>| {
-                if let Ok(event) = res {
-                    info!("File changed..");
-
-                    if matches!(event.kind, EventKind::Modify(_)) {
-                        let mut last_event = last_event_time.lock().unwrap();
-                        let now = Instant::now();
-
-                        if now.duration_since(*last_event) > debounce_duration {
-                            *last_event = now;
-                            tx.send(()).expect("Failed to send notification");
-                        } else {
-                            info!("Skipping duplicate event..");
-                        }
-                    }
-                }
-            }
-        },
-        notify::Config::default().with_poll_interval(Duration::from_millis(1000)),
-    )?;
-
-    watcher.watch(&file_path, RecursiveMode::NonRecursive)?;
-
-    info!("Watching: {}", file_path.display());
-
-    // Handle file changes asynchronously
-    for _ in rx {
-        if let Err(e) = execute_command(&command) {
-            error!("Error executing command: {}", e);
-        }
-    }
-
-    Ok(())
+    async_watch(file_path, command).await
 }
