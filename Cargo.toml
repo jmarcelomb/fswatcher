@@ -1,0 +1,12 @@
+[package]
+name = "fswatcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = "4.5.29"
+env_logger = "0.11.6"
+fs2 = "0.4.3"
+log = "0.4.25"
+notify = "8.0.0"
+shell-escape = "0.1.5"
