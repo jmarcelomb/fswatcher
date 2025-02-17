@@ -27,7 +27,7 @@ fswatcher <file> <command>
 ### Example:
 
 ```sh
-fswatcher config.yaml 'echo "Config changed!"''
+fswatcher config.yaml 'echo "Config changed!"'
 ```
 
 This will monitor `config.yaml` and print "Config changed!" whenever the file is modified.
