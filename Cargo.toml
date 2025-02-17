@@ -27,3 +27,8 @@ tokio = { version = "1.43.0", features = [
   "rt-multi-thread",
   "macros",
 ] }
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3
