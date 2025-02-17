@@ -1,3 +1,9 @@
+//! A file system watcher that executes a command when a specified file changes.
+//!
+//! This crate provides a simple utility to watch a file for changes and execute
+//! a command whenever the file is modified. It uses asynchronous I/O for
+//! efficient file watching and command execution.
+
 use clap::{Arg, Command as ClapCommand};
 use futures::{
     channel::mpsc::{channel, Receiver},
@@ -12,11 +18,18 @@ use std::io::{self, ErrorKind};
 use std::{path::PathBuf, sync::Arc};
 use tokio::{process::Command, signal};
 
+/// Represents a lock file to prevent multiple instances of the watcher.
 struct LockFile {
     path: PathBuf,
 }
 
-/// Generate a unique hash for the command string
+/// Generates a unique hash for a given command string.
+///
+/// # Arguments
+/// * `command` - The command string to hash.
+///
+/// # Returns
+/// A `u64` hash value.
 fn hash_command(command: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     command.hash(&mut hasher);
@@ -24,6 +37,13 @@ fn hash_command(command: &str) -> u64 {
 }
 
 impl LockFile {
+    /// Creates a new lock file for the given command.
+    ///
+    /// # Arguments
+    /// * `command` - The command string used to generate a unique lock file name.
+    ///
+    /// # Returns
+    /// An `io::Result<LockFile>` representing the lock file.
     fn new(command: &str) -> io::Result<Self> {
         let lock_file_path =
             PathBuf::from(format!("/tmp/fswatcher_{}.lock", hash_command(command)));
@@ -50,6 +70,7 @@ impl LockFile {
         }
     }
 
+    /// Cleans up the lock file by deleting it.
     fn cleanup(&self) {
         if let Err(e) = remove_file(&self.path) {
             error!(
@@ -64,11 +85,19 @@ impl LockFile {
 }
 
 impl Drop for LockFile {
+    /// Automatically cleans up the lock file when the `LockFile` instance is dropped.
     fn drop(&mut self) {
         self.cleanup();
     }
 }
 
+/// Executes a shell command asynchronously.
+///
+/// # Arguments
+/// * `command` - The command to execute.
+///
+/// # Returns
+/// An `io::Result<()>` indicating success or failure.
 async fn execute_command(command: &str) -> io::Result<()> {
     info!("Executing command: {}", command);
     let status = Command::new("sh")
@@ -83,6 +112,10 @@ async fn execute_command(command: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Creates an asynchronous file watcher.
+///
+/// # Returns
+/// A tuple containing the watcher and a receiver for file change events.
 fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Result<Event>>)> {
     let (mut tx, rx) = channel(1);
     let watcher = RecommendedWatcher::new(
@@ -96,6 +129,14 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Resul
     Ok((watcher, rx))
 }
 
+/// Watches a file for changes and executes a command when changes are detected.
+///
+/// # Arguments
+/// * `path` - The path to the file to watch.
+/// * `command` - The command to execute when the file changes.
+///
+/// # Returns
+/// A `notify::Result<()>` indicating success or failure.
 async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
     let (mut watcher, mut rx) = async_watcher()?;
     watcher.watch(&path, RecursiveMode::NonRecursive)?;
@@ -114,11 +155,14 @@ async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
     Ok(())
 }
 
+/// The main entry point for the file watcher application.
 #[tokio::main]
 async fn main() -> notify::Result<()> {
+    // Initialize the logger with a default log level of "warn".
     env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", "warn"))
         .init();
 
+    // Parse command-line arguments.
     let matches = ClapCommand::new("fswatcher")
         .version(env!("CARGO_PKG_VERSION"))
         .author("Marcel Borges")
@@ -140,6 +184,7 @@ async fn main() -> notify::Result<()> {
         )
         .get_matches();
 
+    // Get the file path and command from the parsed arguments.
     let file_path = PathBuf::from(matches.get_one::<String>("file").unwrap());
     let command = matches
         .get_many::<String>("command")
@@ -148,13 +193,13 @@ async fn main() -> notify::Result<()> {
         .collect::<Vec<&str>>()
         .join(" ");
 
-    // Prevent multiple instances
+    // Prevent multiple instances by creating a lock file.
     let lock_file = Arc::new(LockFile::new(&command).map_err(|e| {
         error!("Failed to acquire lock file: {}", e);
         notify::Error::generic(format!("Lock file error: {:?}", e).as_str())
     })?);
 
-    // Handle Ctrl+C to clean up lock file
+    // Handle Ctrl+C to clean up the lock file.
     let lock_file_clone = lock_file.clone();
 
     tokio::spawn(async move {
@@ -164,5 +209,6 @@ async fn main() -> notify::Result<()> {
         std::process::exit(0);
     });
 
+    // Start watching the file for changes.
     async_watch(file_path, command).await
 }

@@ -2,6 +2,12 @@
 name = "fswatcher"
 version = "0.2.0"
 edition = "2021"
+description = "A file system watcher that executes a command when a specified file changes."
+authors = ["Marcelo Borges <me@marceloborges.dev>"]
+license = "MIT"
+repository = "https://github.com/jmarcelomb/fswatcher"
+keywords = ["file", "watcher", "cli", "async"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 clap = "4.5.29"
