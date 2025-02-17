@@ -1,6 +1,6 @@
 [package]
 name = "fswatcher"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "A file system watcher that executes a command when a specified file changes."
 authors = ["Marcelo Borges <me@marceloborges.dev>"]
@@ -21,7 +21,9 @@ log = "0.4.25"
 notify = "8.0.0"
 shell-escape = "0.1.5"
 tokio = { version = "1.43.0", features = [
+  "fs",
   "process",
+  "time",
   "signal",
   "sync",
   "rt-multi-thread",

@@ -9,13 +9,14 @@ use futures::{
     channel::mpsc::{channel, Receiver},
     SinkExt, StreamExt,
 };
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::hash_map::DefaultHasher;
 use std::fs::{remove_file, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{self, ErrorKind};
 use std::{path::PathBuf, sync::Arc};
+use tokio::time::Duration;
 use tokio::{process::Command, signal};
 
 /// Represents a lock file to prevent multiple instances of the watcher.
@@ -91,7 +92,7 @@ impl Drop for LockFile {
     }
 }
 
-/// Executes a shell command asynchronously.
+/// Executes a shell command asynchronously and prints its output.
 ///
 /// # Arguments
 /// * `command` - The command to execute.
@@ -100,15 +101,23 @@ impl Drop for LockFile {
 /// An `io::Result<()>` indicating success or failure.
 async fn execute_command(command: &str) -> io::Result<()> {
     info!("Executing command: {}", command);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .spawn()?
-        .wait()
-        .await?;
-    if !status.success() {
-        error!("Command failed: {} with status: {:?}", command, status);
+
+    let output = Command::new("sh").arg("-c").arg(command).output().await?;
+
+    if !output.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
     }
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    if !output.status.success() {
+        error!(
+            "Command failed: {} with status: {:?}",
+            command, output.status
+        );
+    }
+
     Ok(())
 }
 
@@ -138,15 +147,35 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Resul
 /// # Returns
 /// A `notify::Result<()>` indicating success or failure.
 async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
+    let absolute_path = tokio::fs::canonicalize(&path).await.map_err(|e| {
+        error!(
+            "Failed to resolve absolute path for {}: {}",
+            path.display(),
+            e
+        );
+        notify::Error::generic("Invalid file path")
+    })?;
+
     let (mut watcher, mut rx) = async_watcher()?;
-    watcher.watch(&path, RecursiveMode::NonRecursive)?;
-    info!("Watching: {}", path.display());
+    watcher.watch(&absolute_path, RecursiveMode::NonRecursive)?;
+    info!("Watching: {}", absolute_path.display());
+
+    let mut last_execution = tokio::time::Instant::now();
+    let debounce_duration = Duration::from_millis(500);
+
     while let Some(res) = rx.next().await {
         match res {
             Ok(event) => {
-                info!("File changed: {:?}", event);
-                if let Err(e) = execute_command(&command).await {
-                    error!("Error executing command: {}", e);
+                debug!("Received event: {:?}", event);
+                if event.kind.is_modify() && event.paths.iter().any(|p| p == &absolute_path) {
+                    let now = tokio::time::Instant::now();
+                    if now.duration_since(last_execution) >= debounce_duration {
+                        info!("File written: {:?}", event);
+                        if let Err(e) = execute_command(&command).await {
+                            error!("Error executing command: {}", e);
+                        }
+                        last_execution = now;
+                    }
                 }
             }
             Err(e) => error!("Watch error: {:?}", e),
