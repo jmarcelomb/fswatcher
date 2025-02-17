@@ -64,6 +64,6 @@ Contributions, issues, and feature requests are welcome! Feel free to open an is
 
 ---
 
-Created by [Marcel Borges](https://github.com/jmarcelomb).
+Created by [Marcelo Borges](https://github.com/jmarcelomb).
 
 
