@@ -21,8 +21,10 @@ repos:
     rev: v8.23.3
     hooks:
       - id: gitleaks
-  - repo: https://github.com/doublify/pre-commit-rust
-    rev: master
+  - repo: https://github.com/backplane/pre-commit-rust-hooks
+    rev: v1.1.0
     hooks:
       - id: fmt
-      - id: cargo-check
+      - id: check
+      - id: clippy
+      - id: test
