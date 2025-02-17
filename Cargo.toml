@@ -9,6 +9,8 @@ repository = "https://github.com/jmarcelomb/fswatcher"
 keywords = ["file", "watcher", "cli", "async"]
 categories = ["command-line-utilities", "filesystem"]
 
+include = ["Cargo.toml", "LICENSE", "README.md", "src/main.rs"]
+
 [dependencies]
 clap = "4.5.29"
 ctrlc = "3.4.5"
