@@ -12,6 +12,7 @@ use futures::{
 use log::{debug, error, info, warn};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::hash_map::DefaultHasher;
+use std::env;
 use std::hash::{Hash, Hasher};
 use std::io::{self, ErrorKind};
 use std::{path::PathBuf, sync::Arc};
@@ -136,7 +137,25 @@ impl Drop for LockFile {
 async fn execute_command(command: &str) -> io::Result<()> {
     info!("Executing command: {}", command);
 
-    let output = Command::new("sh").arg("-c").arg(command).output().await?;
+    // Determine the shell based on the parent process's environment.
+    let (shell, args) = if cfg!(windows) {
+        if env::var("PSModulePath").is_ok() {
+            (
+                "powershell.exe".to_string(),
+                vec!["-Command".to_string(), command.to_string()],
+            )
+        } else {
+            (
+                "cmd.exe".to_string(),
+                vec!["/C".to_string(), command.to_string()],
+            )
+        }
+    } else {
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        (shell, vec!["-c".to_string(), command.to_string()])
+    };
+
+    let output = Command::new(shell).args(args).output().await?;
 
     if !output.stdout.is_empty() {
         print!("{}", String::from_utf8_lossy(&output.stdout));
