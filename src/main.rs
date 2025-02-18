@@ -12,12 +12,11 @@ use futures::{
 use log::{debug, error, info, warn};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::hash_map::DefaultHasher;
-use std::fs::{remove_file, OpenOptions};
 use std::hash::{Hash, Hasher};
 use std::io::{self, ErrorKind};
 use std::{path::PathBuf, sync::Arc};
 use tokio::time::Duration;
-use tokio::{process::Command, signal};
+use tokio::{fs, process::Command, signal};
 
 /// Represents a lock file to prevent multiple instances of the watcher.
 struct LockFile {
@@ -45,14 +44,23 @@ impl LockFile {
     ///
     /// # Returns
     /// An `io::Result<LockFile>` representing the lock file.
-    fn new(command: &str) -> io::Result<Self> {
-        let lock_file_path =
-            PathBuf::from(format!("/tmp/fswatcher_{}.lock", hash_command(command)));
+    async fn new(command: &str) -> io::Result<Self> {
+        let temp_dir = std::env::temp_dir();
+        let fswatcher_dir = temp_dir.join("fswatcher");
 
-        match OpenOptions::new()
+        if !fswatcher_dir.exists() {
+            fs::create_dir_all(&fswatcher_dir).await?;
+            info!("Created fswatcher directory: {}", fswatcher_dir.display());
+        }
+
+        // Create the lock file path inside the `fswatcher` directory.
+        let lock_file_path =
+            fswatcher_dir.join(format!("fswatcher_{}.lock", hash_command(command)));
+        match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock_file_path)
+            .await
         {
             Ok(_) => {
                 info!("Lock file created: {}", lock_file_path.display());
@@ -72,8 +80,10 @@ impl LockFile {
     }
 
     /// Cleans up the lock file by deleting it.
-    fn cleanup(&self) {
-        if let Err(e) = remove_file(&self.path) {
+    /// Also deletes the `fswatcher` directory if it is empty.
+    async fn cleanup(&self) {
+        // Delete the lock file.
+        if let Err(e) = fs::remove_file(&self.path).await {
             error!(
                 "Failed to delete lock file {}: {:?}",
                 self.path.display(),
@@ -82,13 +92,37 @@ impl LockFile {
         } else {
             info!("Lock file deleted: {}", self.path.display());
         }
+
+        // Check if the `fswatcher` directory is empty.
+        let fswatcher_dir = self.path.parent().unwrap(); // Safe to unwrap because we know the parent is `fswatcher`.
+        let mut entries = fs::read_dir(fswatcher_dir).await.unwrap();
+        if entries.next_entry().await.unwrap().is_none() {
+            // Directory is empty, delete it.
+            if let Err(e) = fs::remove_dir(fswatcher_dir).await {
+                error!(
+                    "Failed to delete empty fswatcher directory {}: {:?}",
+                    fswatcher_dir.display(),
+                    e
+                );
+            } else {
+                info!(
+                    "Deleted empty fswatcher directory: {}",
+                    fswatcher_dir.display()
+                );
+            }
+        }
     }
 }
 
 impl Drop for LockFile {
     /// Automatically cleans up the lock file when the `LockFile` instance is dropped.
     fn drop(&mut self) {
-        self.cleanup();
+        // Use `tokio::spawn` to run the async cleanup in the background.
+        let path = self.path.clone();
+        tokio::spawn(async move {
+            let lock_file = LockFile { path };
+            lock_file.cleanup().await;
+        });
     }
 }
 
@@ -223,7 +257,7 @@ async fn main() -> notify::Result<()> {
         .join(" ");
 
     // Prevent multiple instances by creating a lock file.
-    let lock_file = Arc::new(LockFile::new(&command).map_err(|e| {
+    let lock_file = Arc::new(LockFile::new(&command).await.map_err(|e| {
         error!("Failed to acquire lock file: {}", e);
         notify::Error::generic(format!("Lock file error: {:?}", e).as_str())
     })?);
@@ -234,7 +268,7 @@ async fn main() -> notify::Result<()> {
     tokio::spawn(async move {
         signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info!("Received SIGINT, cleaning up..");
-        lock_file_clone.cleanup();
+        lock_file_clone.cleanup().await;
         std::process::exit(0);
     });
 
