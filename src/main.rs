@@ -1,13 +1,7 @@
-//! A file system watcher that executes a command when a specified file changes.
-//!
-//! This crate provides a simple utility to watch a file for changes and execute
-//! a command whenever the file is modified. It uses asynchronous I/O for
-//! efficient file watching and command execution.
-
-use clap::{Arg, Command as ClapCommand};
+use clap::{Arg, ArgAction, Command as ClapCommand};
 use futures::{
-    channel::mpsc::{channel, Receiver},
     SinkExt, StreamExt,
+    channel::mpsc::{Receiver, channel},
 };
 use log::{debug, error, info, warn};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -84,33 +78,39 @@ impl LockFile {
     /// Also deletes the `fswatcher` directory if it is empty.
     async fn cleanup(&self) {
         // Delete the lock file.
-        match fs::remove_file(&self.path).await { Err(e) => {
-            error!(
-                "Failed to delete lock file {}: {:?}",
-                self.path.display(),
-                e
-            );
-        } _ => {
-            info!("Lock file deleted: {}", self.path.display());
-        }}
+        match fs::remove_file(&self.path).await {
+            Err(e) => {
+                error!(
+                    "Failed to delete lock file {}: {:?}",
+                    self.path.display(),
+                    e
+                );
+            }
+            _ => {
+                info!("Lock file deleted: {}", self.path.display());
+            }
+        }
 
         // Check if the `fswatcher` directory is empty.
         let fswatcher_dir = self.path.parent().unwrap(); // Safe to unwrap because we know the parent is `fswatcher`.
         let mut entries = fs::read_dir(fswatcher_dir).await.unwrap();
         if entries.next_entry().await.unwrap().is_none() {
             // Directory is empty, delete it.
-            match fs::remove_dir(fswatcher_dir).await { Err(e) => {
-                error!(
-                    "Failed to delete empty fswatcher directory {}: {:?}",
-                    fswatcher_dir.display(),
-                    e
-                );
-            } _ => {
-                info!(
-                    "Deleted empty fswatcher directory: {}",
-                    fswatcher_dir.display()
-                );
-            }}
+            match fs::remove_dir(fswatcher_dir).await {
+                Err(e) => {
+                    error!(
+                        "Failed to delete empty fswatcher directory {}: {:?}",
+                        fswatcher_dir.display(),
+                        e
+                    );
+                }
+                _ => {
+                    info!(
+                        "Deleted empty fswatcher directory: {}",
+                        fswatcher_dir.display()
+                    );
+                }
+            }
         }
     }
 }
@@ -196,10 +196,15 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Resul
 /// # Arguments
 /// * `path` - The path to the file to watch.
 /// * `command` - The command to execute when the file changes.
+/// * `debounce_duration` - The debounce time used between events.
 ///
 /// # Returns
 /// A `notify::Result<()>` indicating success or failure.
-async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
+async fn async_watch(
+    path: PathBuf,
+    command: String,
+    debounce_duration: Duration,
+) -> notify::Result<()> {
     let absolute_path = tokio::fs::canonicalize(&path).await.map_err(|e| {
         error!(
             "Failed to resolve absolute path for {}: {}",
@@ -214,7 +219,6 @@ async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
     info!("Watching: {}", absolute_path.display());
 
     let mut last_execution = tokio::time::Instant::now();
-    let debounce_duration = Duration::from_millis(500);
 
     while let Some(res) = rx.next().await {
         match res {
@@ -240,10 +244,6 @@ async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
 /// The main entry point for the file watcher application.
 #[tokio::main]
 async fn main() -> notify::Result<()> {
-    // Initialize the logger with a default log level of "warn".
-    env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", "warn"))
-        .init();
-
     // Parse command-line arguments.
     let matches = ClapCommand::new("fswatcher")
         .version(env!("CARGO_PKG_VERSION"))
@@ -264,7 +264,32 @@ async fn main() -> notify::Result<()> {
                 .allow_hyphen_values(true)
                 .trailing_var_arg(true),
         )
+        .arg(
+            Arg::new("debounce")
+                .short('d')
+                .long("debounce")
+                .help("The debounce time in milliseconds")
+                .value_name("milliseconds")
+                .default_value("200"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .action(ArgAction::Count)
+                .help("Sets the level of verbosity"),
+        )
         .get_matches();
+
+    // Set the log level based on the verbosity flag.
+    let log_level = match matches.get_count("verbose") {
+        1 => "info",
+        2 => "debug",
+        _ => "warn",
+    };
+
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", log_level))
+        .init();
+    info!("verbose received {:?}", log_level);
 
     // Get the file path and command from the parsed arguments.
     let file_path = PathBuf::from(matches.get_one::<String>("file").unwrap());
@@ -274,6 +299,16 @@ async fn main() -> notify::Result<()> {
         .map(String::as_str)
         .collect::<Vec<&str>>()
         .join(" ");
+
+    // Get the debounce duration from the parsed arguments.
+    let debounce_duration = Duration::from_millis(
+        matches
+            .get_one::<String>("debounce")
+            .unwrap()
+            .parse::<u64>()
+            .expect("Debounce time must be a number"),
+    );
+    info!("Received the debounce {:?}", debounce_duration);
 
     // Prevent multiple instances by creating a lock file.
     let lock_file = Arc::new(LockFile::new(&command).await.map_err(|e| {
@@ -292,5 +327,5 @@ async fn main() -> notify::Result<()> {
     });
 
     // Start watching the file for changes.
-    async_watch(file_path, command).await
+    async_watch(file_path, command, debounce_duration).await
 }
