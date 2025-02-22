@@ -84,33 +84,33 @@ impl LockFile {
     /// Also deletes the `fswatcher` directory if it is empty.
     async fn cleanup(&self) {
         // Delete the lock file.
-        if let Err(e) = fs::remove_file(&self.path).await {
+        match fs::remove_file(&self.path).await { Err(e) => {
             error!(
                 "Failed to delete lock file {}: {:?}",
                 self.path.display(),
                 e
             );
-        } else {
+        } _ => {
             info!("Lock file deleted: {}", self.path.display());
-        }
+        }}
 
         // Check if the `fswatcher` directory is empty.
         let fswatcher_dir = self.path.parent().unwrap(); // Safe to unwrap because we know the parent is `fswatcher`.
         let mut entries = fs::read_dir(fswatcher_dir).await.unwrap();
         if entries.next_entry().await.unwrap().is_none() {
             // Directory is empty, delete it.
-            if let Err(e) = fs::remove_dir(fswatcher_dir).await {
+            match fs::remove_dir(fswatcher_dir).await { Err(e) => {
                 error!(
                     "Failed to delete empty fswatcher directory {}: {:?}",
                     fswatcher_dir.display(),
                     e
                 );
-            } else {
+            } _ => {
                 info!(
                     "Deleted empty fswatcher directory: {}",
                     fswatcher_dir.display()
                 );
-            }
+            }}
         }
     }
 }
