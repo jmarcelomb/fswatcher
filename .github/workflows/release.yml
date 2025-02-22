@@ -59,6 +59,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get install -y --no-install-recommends musl-tools
 
+      - name: Install dependencies (macOS only)
+        if: matrix.os == 'macos-latest'
+        run: brew install coreutils
+
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
