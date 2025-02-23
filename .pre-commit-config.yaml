@@ -1,3 +1,5 @@
+ci:
+    skip: [fmt, check, clippy, test]
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -21,8 +23,10 @@ repos:
     rev: v8.23.3
     hooks:
       - id: gitleaks
-  - repo: https://github.com/doublify/pre-commit-rust
-    rev: v1.0
+  - repo: https://github.com/backplane/pre-commit-rust-hooks
+    rev: v1.1.0
     hooks:
       - id: fmt
-      - id: cargo-check
+      - id: check
+      - id: clippy
+      - id: test

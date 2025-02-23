@@ -1,22 +1,17 @@
-//! A file system watcher that executes a command when a specified file changes.
-//!
-//! This crate provides a simple utility to watch a file for changes and execute
-//! a command whenever the file is modified. It uses asynchronous I/O for
-//! efficient file watching and command execution.
-
-use clap::{Arg, Command as ClapCommand};
+use clap::{Arg, ArgAction, Command as ClapCommand};
 use futures::{
-    channel::mpsc::{channel, Receiver},
     SinkExt, StreamExt,
+    channel::mpsc::{Receiver, channel},
 };
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::hash_map::DefaultHasher;
-use std::fs::{remove_file, OpenOptions};
+use std::env;
 use std::hash::{Hash, Hasher};
 use std::io::{self, ErrorKind};
 use std::{path::PathBuf, sync::Arc};
-use tokio::{process::Command, signal};
+use tokio::time::Duration;
+use tokio::{fs, process::Command, signal};
 
 /// Represents a lock file to prevent multiple instances of the watcher.
 struct LockFile {
@@ -44,14 +39,23 @@ impl LockFile {
     ///
     /// # Returns
     /// An `io::Result<LockFile>` representing the lock file.
-    fn new(command: &str) -> io::Result<Self> {
-        let lock_file_path =
-            PathBuf::from(format!("/tmp/fswatcher_{}.lock", hash_command(command)));
+    async fn new(command: &str) -> io::Result<Self> {
+        let temp_dir = std::env::temp_dir();
+        let fswatcher_dir = temp_dir.join("fswatcher");
 
-        match OpenOptions::new()
+        if !fswatcher_dir.exists() {
+            fs::create_dir_all(&fswatcher_dir).await?;
+            info!("Created fswatcher directory: {}", fswatcher_dir.display());
+        }
+
+        // Create the lock file path inside the `fswatcher` directory.
+        let lock_file_path =
+            fswatcher_dir.join(format!("fswatcher_{}.lock", hash_command(command)));
+        match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&lock_file_path)
+            .await
         {
             Ok(_) => {
                 info!("Lock file created: {}", lock_file_path.display());
@@ -71,15 +75,42 @@ impl LockFile {
     }
 
     /// Cleans up the lock file by deleting it.
-    fn cleanup(&self) {
-        if let Err(e) = remove_file(&self.path) {
-            error!(
-                "Failed to delete lock file {}: {:?}",
-                self.path.display(),
-                e
-            );
-        } else {
-            info!("Lock file deleted: {}", self.path.display());
+    /// Also deletes the `fswatcher` directory if it is empty.
+    async fn cleanup(&self) {
+        // Delete the lock file.
+        match fs::remove_file(&self.path).await {
+            Err(e) => {
+                error!(
+                    "Failed to delete lock file {}: {:?}",
+                    self.path.display(),
+                    e
+                );
+            }
+            _ => {
+                info!("Lock file deleted: {}", self.path.display());
+            }
+        }
+
+        // Check if the `fswatcher` directory is empty.
+        let fswatcher_dir = self.path.parent().unwrap(); // Safe to unwrap because we know the parent is `fswatcher`.
+        let mut entries = fs::read_dir(fswatcher_dir).await.unwrap();
+        if entries.next_entry().await.unwrap().is_none() {
+            // Directory is empty, delete it.
+            match fs::remove_dir(fswatcher_dir).await {
+                Err(e) => {
+                    error!(
+                        "Failed to delete empty fswatcher directory {}: {:?}",
+                        fswatcher_dir.display(),
+                        e
+                    );
+                }
+                _ => {
+                    info!(
+                        "Deleted empty fswatcher directory: {}",
+                        fswatcher_dir.display()
+                    );
+                }
+            }
         }
     }
 }
@@ -87,11 +118,16 @@ impl LockFile {
 impl Drop for LockFile {
     /// Automatically cleans up the lock file when the `LockFile` instance is dropped.
     fn drop(&mut self) {
-        self.cleanup();
+        // Use `tokio::spawn` to run the async cleanup in the background.
+        let path = self.path.clone();
+        tokio::spawn(async move {
+            let lock_file = LockFile { path };
+            lock_file.cleanup().await;
+        });
     }
 }
 
-/// Executes a shell command asynchronously.
+/// Executes a shell command asynchronously and prints its output.
 ///
 /// # Arguments
 /// * `command` - The command to execute.
@@ -100,15 +136,41 @@ impl Drop for LockFile {
 /// An `io::Result<()>` indicating success or failure.
 async fn execute_command(command: &str) -> io::Result<()> {
     info!("Executing command: {}", command);
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .spawn()?
-        .wait()
-        .await?;
-    if !status.success() {
-        error!("Command failed: {} with status: {:?}", command, status);
+
+    // Determine the shell based on the parent process's environment.
+    let (shell, args) = if cfg!(windows) {
+        if env::var("PSModulePath").is_ok() {
+            (
+                "powershell.exe".to_string(),
+                vec!["-Command".to_string(), command.to_string()],
+            )
+        } else {
+            (
+                "cmd.exe".to_string(),
+                vec!["/C".to_string(), command.to_string()],
+            )
+        }
+    } else {
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        (shell, vec!["-c".to_string(), command.to_string()])
+    };
+
+    let output = Command::new(shell).args(args).output().await?;
+
+    if !output.stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&output.stdout));
     }
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    if !output.status.success() {
+        error!(
+            "Command failed: {} with status: {:?}",
+            command, output.status
+        );
+    }
+
     Ok(())
 }
 
@@ -134,19 +196,43 @@ fn async_watcher() -> notify::Result<(RecommendedWatcher, Receiver<notify::Resul
 /// # Arguments
 /// * `path` - The path to the file to watch.
 /// * `command` - The command to execute when the file changes.
+/// * `debounce_duration` - The debounce time used between events.
 ///
 /// # Returns
 /// A `notify::Result<()>` indicating success or failure.
-async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
+async fn async_watch(
+    path: PathBuf,
+    command: String,
+    debounce_duration: Duration,
+) -> notify::Result<()> {
+    let absolute_path = tokio::fs::canonicalize(&path).await.map_err(|e| {
+        error!(
+            "Failed to resolve absolute path for {}: {}",
+            path.display(),
+            e
+        );
+        notify::Error::generic("Invalid file path")
+    })?;
+
     let (mut watcher, mut rx) = async_watcher()?;
-    watcher.watch(&path, RecursiveMode::NonRecursive)?;
-    info!("Watching: {}", path.display());
+    watcher.watch(&absolute_path, RecursiveMode::NonRecursive)?;
+    info!("Watching: {}", absolute_path.display());
+
+    let mut last_execution = tokio::time::Instant::now();
+
     while let Some(res) = rx.next().await {
         match res {
             Ok(event) => {
-                info!("File changed: {:?}", event);
-                if let Err(e) = execute_command(&command).await {
-                    error!("Error executing command: {}", e);
+                debug!("Received event: {:?}", event);
+                if event.kind.is_modify() && event.paths.iter().any(|p| p == &absolute_path) {
+                    let now = tokio::time::Instant::now();
+                    if now.duration_since(last_execution) >= debounce_duration {
+                        info!("File written: {:?}", event);
+                        if let Err(e) = execute_command(&command).await {
+                            error!("Error executing command: {}", e);
+                        }
+                        last_execution = now;
+                    }
                 }
             }
             Err(e) => error!("Watch error: {:?}", e),
@@ -158,10 +244,6 @@ async fn async_watch(path: PathBuf, command: String) -> notify::Result<()> {
 /// The main entry point for the file watcher application.
 #[tokio::main]
 async fn main() -> notify::Result<()> {
-    // Initialize the logger with a default log level of "warn".
-    env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", "warn"))
-        .init();
-
     // Parse command-line arguments.
     let matches = ClapCommand::new("fswatcher")
         .version(env!("CARGO_PKG_VERSION"))
@@ -182,7 +264,32 @@ async fn main() -> notify::Result<()> {
                 .allow_hyphen_values(true)
                 .trailing_var_arg(true),
         )
+        .arg(
+            Arg::new("debounce")
+                .short('d')
+                .long("debounce")
+                .help("The debounce time in milliseconds")
+                .value_name("milliseconds")
+                .default_value("200"),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .action(ArgAction::Count)
+                .help("Sets the level of verbosity"),
+        )
         .get_matches();
+
+    // Set the log level based on the verbosity flag.
+    let log_level = match matches.get_count("verbose") {
+        1 => "info",
+        2 => "debug",
+        _ => "warn",
+    };
+
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("FSWATCHER_LOG", log_level))
+        .init();
+    info!("verbose received {:?}", log_level);
 
     // Get the file path and command from the parsed arguments.
     let file_path = PathBuf::from(matches.get_one::<String>("file").unwrap());
@@ -193,8 +300,18 @@ async fn main() -> notify::Result<()> {
         .collect::<Vec<&str>>()
         .join(" ");
 
+    // Get the debounce duration from the parsed arguments.
+    let debounce_duration = Duration::from_millis(
+        matches
+            .get_one::<String>("debounce")
+            .unwrap()
+            .parse::<u64>()
+            .expect("Debounce time must be a number"),
+    );
+    info!("Received the debounce {:?}", debounce_duration);
+
     // Prevent multiple instances by creating a lock file.
-    let lock_file = Arc::new(LockFile::new(&command).map_err(|e| {
+    let lock_file = Arc::new(LockFile::new(&command).await.map_err(|e| {
         error!("Failed to acquire lock file: {}", e);
         notify::Error::generic(format!("Lock file error: {:?}", e).as_str())
     })?);
@@ -205,10 +322,10 @@ async fn main() -> notify::Result<()> {
     tokio::spawn(async move {
         signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info!("Received SIGINT, cleaning up..");
-        lock_file_clone.cleanup();
+        lock_file_clone.cleanup().await;
         std::process::exit(0);
     });
 
     // Start watching the file for changes.
-    async_watch(file_path, command).await
+    async_watch(file_path, command, debounce_duration).await
 }
