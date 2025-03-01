@@ -17,7 +17,7 @@ ctrlc = "3.4.5"
 env_logger = "0.11.6"
 fs2 = "0.4.3"
 futures = "0.3.31"
-log = "0.4.25"
+log = "0.4.26"
 notify = "8.0.0"
 shell-escape = "0.1.5"
 tokio = { version = "1.43.0", features = [
