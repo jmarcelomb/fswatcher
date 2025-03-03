@@ -215,7 +215,7 @@ async fn async_watch(
     })?;
 
     let (mut watcher, mut rx) = async_watcher()?;
-    watcher.watch(&absolute_path, RecursiveMode::NonRecursive)?;
+    watcher.watch(&absolute_path, RecursiveMode::Recursive)?;
     info!("Watching: {}", absolute_path.display());
 
     let mut last_execution = tokio::time::Instant::now();
