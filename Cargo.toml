@@ -1,6 +1,6 @@
 [package]
 name = "fswatcher"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A file system watcher that executes a command when a specified file changes."
 authors = ["Marcelo Borges <me@marceloborges.dev>"]
