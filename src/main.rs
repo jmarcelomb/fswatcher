@@ -45,7 +45,7 @@ impl LockFile {
 
         if !fswatcher_dir.exists() {
             fs::create_dir_all(&fswatcher_dir).await?;
-            info!("Created fswatcher directory: {}", fswatcher_dir.display());
+            debug!("Created fswatcher directory: {}", fswatcher_dir.display());
         }
 
         // Create the lock file path inside the `fswatcher` directory.
@@ -58,7 +58,7 @@ impl LockFile {
             .await
         {
             Ok(_) => {
-                info!("Lock file created: {}", lock_file_path.display());
+                debug!("Lock file created: {}", lock_file_path.display());
                 Ok(LockFile {
                     path: lock_file_path,
                 })
@@ -93,23 +93,29 @@ impl LockFile {
 
         // Check if the `fswatcher` directory is empty.
         let fswatcher_dir = self.path.parent().unwrap(); // Safe to unwrap because we know the parent is `fswatcher`.
-        let mut entries = fs::read_dir(fswatcher_dir).await.unwrap();
-        if entries.next_entry().await.unwrap().is_none() {
-            // Directory is empty, delete it.
-            match fs::remove_dir(fswatcher_dir).await {
-                Err(e) => {
-                    error!(
-                        "Failed to delete empty fswatcher directory {}: {:?}",
-                        fswatcher_dir.display(),
-                        e
-                    );
+        match fs::read_dir(fswatcher_dir).await {
+            Ok(mut entries) => {
+                if entries.next_entry().await.unwrap().is_none() {
+                    // Directory is empty, delete it.
+                    match fs::remove_dir(fswatcher_dir).await {
+                        Err(e) => {
+                            error!(
+                                "Failed to delete empty fswatcher directory {}: {:?}",
+                                fswatcher_dir.display(),
+                                e
+                            );
+                        }
+                        _ => {
+                            info!(
+                                "Deleted empty fswatcher directory: {}",
+                                fswatcher_dir.display()
+                            );
+                        }
+                    }
                 }
-                _ => {
-                    info!(
-                        "Deleted empty fswatcher directory: {}",
-                        fswatcher_dir.display()
-                    );
-                }
+            }
+            Err(e) => {
+                error!("Failed to read fswatcher directory: {:?}", e);
             }
         }
     }
@@ -205,14 +211,17 @@ async fn async_watch(
     command: String,
     debounce_duration: Duration,
 ) -> notify::Result<()> {
-    let absolute_path = tokio::fs::canonicalize(&path).await.map_err(|e| {
+    let absolute_path_result = tokio::fs::canonicalize(&path).await;
+
+    if let Err(e) = &absolute_path_result {
         error!(
             "Failed to resolve absolute path for {}: {}",
             path.display(),
             e
         );
-        notify::Error::generic("Invalid file path")
-    })?;
+        return Err(notify::Error::generic("Invalid file path"));
+    }
+    let absolute_path = absolute_path_result.unwrap();
 
     let (mut watcher, mut rx) = async_watcher()?;
     watcher.watch(&absolute_path, RecursiveMode::Recursive)?;
@@ -318,7 +327,6 @@ async fn main() -> notify::Result<()> {
 
     // Handle Ctrl+C to clean up the lock file.
     let lock_file_clone = lock_file.clone();
-
     tokio::spawn(async move {
         signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info!("Received SIGINT, cleaning up..");
@@ -327,5 +335,13 @@ async fn main() -> notify::Result<()> {
     });
 
     // Start watching the file for changes.
-    async_watch(file_path, command, debounce_duration).await
+    let watch_result = async_watch(file_path, command, debounce_duration).await;
+
+    // Clean up the lock file if `async_watch` returns an error.
+    if watch_result.is_err() {
+        info!("Cleaning up lock file due to an error in the watcher.");
+        lock_file.cleanup().await;
+    }
+
+    watch_result
 }
