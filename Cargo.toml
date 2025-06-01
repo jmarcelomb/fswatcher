@@ -13,7 +13,7 @@ include = ["Cargo.toml", "LICENSE", "README.md", "src/main.rs"]
 
 [dependencies]
 clap = "4.5.34"
-ctrlc = "3.4.5"
+ctrlc = "3.4.7"
 env_logger = "0.11.7"
 fs2 = "0.4.3"
 futures = "0.3.31"
