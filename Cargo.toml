@@ -20,7 +20,7 @@ futures = "0.3.31"
 log = "0.4.27"
 notify = "8.0.0"
 shell-escape = "0.1.5"
-tokio = { version = "1.44.1", features = [
+tokio = { version = "1.47.1", features = [
   "fs",
   "process",
   "time",
